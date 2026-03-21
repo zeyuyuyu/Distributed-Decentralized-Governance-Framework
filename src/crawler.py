@@ -1,83 +1,54 @@
-import time
-import random
-from urllib.parse import urlparse
-from collections import defaultdict
+import asyncio
+import aiohttp
+import hashlib
+import json
 
-class PolitenessPolicies:
-    def __init__(self):
-        self.domain_access_times = defaultdict(float)
-        self.domain_rates = defaultdict(lambda: 1.0) # requests per second
-        self.min_delay = 1.0 # global minimum delay between requests
-        self.backoff_factor = 1.5 # multiplicative increase on 429/503
-        self.recovery_factor = 0.9 # multiplicative decrease when successful
+class ScrapingSwarm:
+    def __init__(self, seed_urls, num_agents=10, max_concurrency=100):
+        self.seed_urls = seed_urls
+        self.num_agents = num_agents
+        self.max_concurrency = max_concurrency
+        self.crawled_urls = set()
+        self.queue = asyncio.Queue()
+        self.results = []
 
-    def get_delay(self, url):
-        domain = urlparse(url).netloc
-        current_time = time.time()
-        last_access = self.domain_access_times[domain]
-        rate = self.domain_rates[domain]
-        
-        delay = max(self.min_delay, 1.0/rate)
-        wait_time = max(0, last_access + delay - current_time)
-        
-        # Add small random jitter
-        wait_time += random.uniform(0, 0.1)
-        return wait_time
+    async def _fetch(self, url):
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                content = await response.text()
+                return content
 
-    def record_success(self, url):
-        domain = urlparse(url).netloc
-        self.domain_access_times[domain] = time.time()
-        self.domain_rates[domain] *= self.recovery_factor
-
-    def record_failure(self, url, status_code):
-        domain = urlparse(url).netloc
-        if status_code in (429, 503):
-            self.domain_rates[domain] /= self.backoff_factor
-
-class Crawler:
-    def __init__(self):
-        self.politeness = PolitenessPolicies()
-        self.visited_urls = set()
-        self.queue = []
-
-    def add_url(self, url):
-        if url not in self.visited_urls:
-            self.queue.append(url)
-
-    async def crawl(self, url):
-        if url in self.visited_urls:
-            return
-
-        # Wait according to politeness policy
-        delay = self.politeness.get_delay(url)
-        if delay > 0:
-            await asyncio.sleep(delay)
-
-        try:
-            # Placeholder for actual HTTP request
-            response = await self.make_request(url)
-            
-            self.visited_urls.add(url)
-            self.politeness.record_success(url)
-
-            # Process response and extract new URLs
-            new_urls = self.extract_urls(response)
-            for new_url in new_urls:
-                self.add_url(new_url)
-
-        except Exception as e:
-            self.politeness.record_failure(url, getattr(e, 'status', 500))
-            # Log error and potentially retry
-
-    async def make_request(self, url):
-        # Placeholder for actual HTTP request implementation
-        pass
-
-    def extract_urls(self, response):
-        # Placeholder for URL extraction logic
-        return []
+    async def _process(self):
+        while True:
+            url = await self.queue.get()
+            if url in self.crawled_urls:
+                self.queue.task_done()
+                continue
+            self.crawled_urls.add(url)
+            try:
+                content = await self._fetch(url)
+                result = {
+                    'url': url,
+                    'content_hash': hashlib.sha256(content.encode()).hexdigest()
+                }
+                self.results.append(result)
+            except Exception as e:
+                print(f'Error fetching {url}: {e}')
+            self.queue.task_done()
 
     async def run(self):
-        while self.queue:
-            url = self.queue.pop(0)
-            await self.crawl(url)
+        for url in self.seed_urls:
+            self.queue.put_nowait(url)
+
+        tasks = [asyncio.create_task(self._process()) for _ in range(self.num_agents)]
+        await self.queue.join()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        return self.results
+
+# Example usage:
+seed_urls = ['https://example.com', 'https://example.org', 'https://example.net']
+swarm = ScrapingSwarm(seed_urls, num_agents=10, max_concurrency=100)
+results = await swarm.run()
+print(json.dumps(results, indent=2))
