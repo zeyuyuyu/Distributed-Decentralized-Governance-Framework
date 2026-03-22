@@ -1,145 +1,102 @@
-import requests
-import json
-from typing import List, Dict, Optional
+#!/usr/bin/env python3
+
+import asyncio
+import aiohttp
+from typing import List, Set, Dict
+from dataclasses import dataclass
+import logging
 from datetime import datetime
-import hashlib
-import socket
 
-class NetworkCrawler:
-    def __init__(self, bootstrap_nodes: List[str] = None):
-        self.bootstrap_nodes = bootstrap_nodes or [
-            'node1.governance.network:8545',
-            'node2.governance.network:8545'
-        ]
-        self.discovered_peers = set()
-        self.validated_peers = set()
-        self.peer_metadata: Dict[str, dict] = {}
+@dataclass
+class PeerInfo:
+    address: str
+    last_seen: datetime
+    consensus_version: str
+    peers: Set[str]
 
-    def discover_network(self) -> set:
-        """Crawl the network to discover active governance nodes"""
-        for bootstrap in self.bootstrap_nodes:
-            try:
-                peers = self._query_node_peers(bootstrap)
-                self.discovered_peers.update(peers)
-                
-                # Recursive discovery through found peers
-                for peer in peers:
-                    if peer not in self.discovered_peers:
-                        new_peers = self._query_node_peers(peer)
-                        self.discovered_peers.update(new_peers)
-            except Exception as e:
-                print(f'Failed to query bootstrap node {bootstrap}: {str(e)}')
+class DistributedCrawler:
+    def __init__(self, bootstrap_nodes: List[str], crawl_interval: int = 300):
+        self.bootstrap_nodes = bootstrap_nodes
+        self.crawl_interval = crawl_interval
+        self.known_peers: Dict[str, PeerInfo] = {}
+        self.session: aiohttp.ClientSession = None
+        self.logger = logging.getLogger(__name__)
+
+    async def init_session(self):
+        if not self.session:
+            self.session = aiohttp.ClientSession()
+
+    async def close(self):
+        if self.session:
+            await self.session.close()
+
+    async def fetch_peer_info(self, peer_address: str) -> PeerInfo:
+        try:
+            async with self.session.get(f'{peer_address}/peer_info', timeout=10) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return PeerInfo(
+                        address=peer_address,
+                        last_seen=datetime.now(),
+                        consensus_version=data.get('version', 'unknown'),
+                        peers=set(data.get('peers', []))
+                    )
+        except Exception as e:
+            self.logger.error(f'Error fetching peer info from {peer_address}: {str(e)}')
+        return None
+
+    async def crawl_network(self):
+        await self.init_session()
         
-        return self.discovered_peers
+        while True:
+            new_peers = set()
+            
+            # Start with bootstrap nodes if no known peers
+            peers_to_crawl = set(self.known_peers.keys()) or set(self.bootstrap_nodes)
+            
+            for peer in peers_to_crawl:
+                peer_info = await self.fetch_peer_info(peer)
+                if peer_info:
+                    self.known_peers[peer] = peer_info
+                    new_peers.update(peer_info.peers)
 
-    def validate_peers(self) -> Dict[str, dict]:
-        """Validate discovered peers and collect their metadata"""
-        for peer in self.discovered_peers:
-            try:
-                if self._validate_peer(peer):
-                    self.validated_peers.add(peer)
-                    self.peer_metadata[peer] = self._get_peer_metadata(peer)
-            except Exception as e:
-                print(f'Failed to validate peer {peer}: {str(e)}')
-        
-        return self.peer_metadata
+            # Add newly discovered peers
+            for new_peer in new_peers:
+                if new_peer not in self.known_peers:
+                    peer_info = await self.fetch_peer_info(new_peer)
+                    if peer_info:
+                        self.known_peers[new_peer] = peer_info
 
-    def _query_node_peers(self, node_addr: str) -> set:
-        """Query a node for its connected peers"""
-        try:
-            url = f'http://{node_addr}/peers'
-            response = requests.get(url, timeout=5)
-            if response.status_code == 200:
-                return set(response.json().get('peers', []))
-        except:
-            pass
-        return set()
+            # Prune stale peers
+            now = datetime.now()
+            stale_peers = [
+                addr for addr, info in self.known_peers.items()
+                if (now - info.last_seen).total_seconds() > self.crawl_interval * 2
+            ]
+            for peer in stale_peers:
+                del self.known_peers[peer]
 
-    def _validate_peer(self, peer: str) -> bool:
-        """Validate a peer node meets protocol requirements"""
-        try:
-            # Check if peer is online
-            host, port = peer.split(':')
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(2)
-            result = sock.connect_ex((host, int(port)))
-            sock.close()
-            if result != 0:
-                return False
+            self.logger.info(f'Network crawl complete. Known peers: {len(self.known_peers)}')
+            await asyncio.sleep(self.crawl_interval)
 
-            # Verify peer version and protocol compatibility
-            url = f'http://{peer}/version'
-            response = requests.get(url, timeout=5)
-            if response.status_code != 200:
-                return False
-                
-            version_data = response.json()
-            if not self._check_version_compatibility(version_data):
-                return False
-
-            return True
-
-        except Exception:
-            return False
-
-    def _get_peer_metadata(self, peer: str) -> dict:
-        """Collect metadata about a peer node"""
-        try:
-            url = f'http://{peer}/status'
-            response = requests.get(url, timeout=5)
-            if response.status_code == 200:
-                metadata = response.json()
-                metadata['last_seen'] = datetime.utcnow().isoformat()
-                metadata['peer_addr'] = peer
-                return metadata
-        except:
-            pass
-        return {}
-
-    def _check_version_compatibility(self, version_data: dict) -> bool:
-        """Check if peer version is compatible"""
-        try:
-            min_version = '1.0.0'
-            peer_version = version_data.get('version')
-            if peer_version:
-                # Simple version comparison - could be enhanced
-                return peer_version >= min_version
-        except:
-            pass
-        return False
-
-    def get_network_status(self) -> Dict[str, any]:
-        """Get overall network status and health metrics"""
+    def get_network_stats(self) -> Dict:
         return {
-            'total_discovered': len(self.discovered_peers),
-            'total_validated': len(self.validated_peers),
-            'active_peers': [
-                peer for peer in self.validated_peers
-                if self._is_peer_active(peer)
-            ],
-            'network_health': self._calculate_health_score(),
-            'timestamp': datetime.utcnow().isoformat()
+            'total_peers': len(self.known_peers),
+            'consensus_versions': {
+                info.consensus_version: len([p for p in self.known_peers.values() 
+                                           if p.consensus_version == info.consensus_version])
+                for info in self.known_peers.values()
+            },
+            'network_density': sum(len(p.peers) for p in self.known_peers.values()) / 
+                              max(len(self.known_peers), 1)
         }
 
-    def _is_peer_active(self, peer: str) -> bool:
-        """Check if a peer is currently active"""
-        metadata = self.peer_metadata.get(peer, {})
-        if not metadata:
-            return False
-            
-        last_seen = metadata.get('last_seen')
-        if not last_seen:
-            return False
-            
-        last_seen_dt = datetime.fromisoformat(last_seen)
-        diff = datetime.utcnow() - last_seen_dt
-        return diff.total_seconds() < 300  # 5 minute threshold
+    async def run(self):
+        try:
+            await self.crawl_network()
+        finally:
+            await self.close()
 
-    def _calculate_health_score(self) -> float:
-        """Calculate overall network health score (0-1)"""
-        if not self.discovered_peers:
-            return 0.0
-            
-        active_peers = len([p for p in self.validated_peers if self._is_peer_active(p)])
-        health_score = active_peers / len(self.discovered_peers)
-        return round(health_score, 2)
+# Usage example:
+# crawler = DistributedCrawler(['http://node1.example.com', 'http://node2.example.com'])
+# asyncio.run(crawler.run())
