@@ -1,52 +1,50 @@
-import asyncio
-import json
-import os
+import requests
+from typing import List, Dict
+from dataclasses import dataclass
 
-from typing import Any, Dict, List
+@dataclass
+class Proposal:
+    id: str
+    title: str
+    description: str
+    votes: int
+    status: str
 
-from src.crawler import crawl_governance_data
+class DecentralizedGovernance:
+    def __init__(self, api_url: str):
+        self.api_url = api_url
 
+    def get_proposals(self) -> List[Proposal]:
+        response = requests.get(f'{self.api_url}/proposals')
+        proposals = [Proposal(**p) for p in response.json()]
+        return proposals
 
-async def fetch_governance_data() -> Dict[str, Any]:
-    """Fetch governance data from decentralized sources."""
-    data = await crawl_governance_data()
-    return data
+    def create_proposal(self, title: str, description: str) -> Proposal:
+        data = {
+            'title': title,
+            'description': description
+        }
+        response = requests.post(f'{self.api_url}/proposals', json=data)
+        return Proposal(**response.json())
 
-
-async def process_governance_data(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Process and aggregate governance data."""
-    aggregated_data = {
-        'proposals': aggregate_proposals(data['proposals']),
-        'votes': aggregate_votes(data['votes']),
-        'delegates': aggregate_delegates(data['delegates'])
-    }
-    return aggregated_data
-
-
-def aggregate_proposals(proposals: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Aggregate proposal data."""
-    # Implement logic to aggregate proposal data
-    return {}
-
-
-def aggregate_votes(votes: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Aggregate vote data."""
-    # Implement logic to aggregate vote data
-    return {}
-
-
-def aggregate_delegates(delegates: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Aggregate delegate data."""
-    # Implement logic to aggregate delegate data
-    return {}
-
-
-async def main():
-    """Main entry point for the application."""
-    governance_data = await fetch_governance_data()
-    aggregated_data = await process_governance_data(governance_data)
-    print(json.dumps(aggregated_data, indent=2))
-
+    def vote_on_proposal(self, proposal_id: str, vote: int) -> Proposal:
+        data = {
+            'vote': vote
+        }
+        response = requests.post(f'{self.api_url}/proposals/{proposal_id}/vote', json=data)
+        return Proposal(**response.json())
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    governance = DecentralizedGovernance('https://api.example.com')
+    proposals = governance.get_proposals()
+    for proposal in proposals:
+        print(proposal)
+
+    new_proposal = governance.create_proposal(
+        title='Increase funding for sustainability initiatives',
+        description='We should allocate more resources towards renewable energy projects and environmental conservation efforts.'
+    )
+    print(new_proposal)
+
+    voted_proposal = governance.vote_on_proposal(new_proposal.id, 1)
+    print(voted_proposal)
