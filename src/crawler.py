@@ -1,95 +1,102 @@
-import asyncio
-import aiohttp
-from typing import List, Dict, Set
-from dataclasses import dataclass
+import requests
+from typing import List, Dict, Optional
 from datetime import datetime
-import json
+import logging
 
-@dataclass
-class PeerNode:
-    id: str
-    address: str
-    last_seen: datetime
-    consensus_version: str
+class GovernanceProposalCrawler:
+    def __init__(self, rpc_endpoints: List[str]):
+        self.rpc_endpoints = rpc_endpoints
+        self.logger = logging.getLogger(__name__)
 
-class DistributedCrawler:
-    def __init__(self, bootstrap_nodes: List[str]):
-        self.bootstrap_nodes = bootstrap_nodes
-        self.known_peers: Dict[str, PeerNode] = {}
-        self.active_peers: Set[str] = set()
-        self.session: aiohttp.ClientSession = None
-    
-    async def start(self):
-        self.session = aiohttp.ClientSession()
-        await self.discover_peers()
+    def fetch_proposals(self, chain_id: int) -> List[Dict]:
+        """Fetch governance proposals from multiple sources for given chain"""
+        proposals = []
         
-    async def stop(self):
-        if self.session:
-            await self.session.close()
-    
-    async def discover_peers(self):
-        """Recursively discover and validate peer nodes"""
-        for node in self.bootstrap_nodes:
-            await self.validate_peer(node)
-    
-    async def validate_peer(self, address: str):
-        """Validate a peer node and collect its metadata"""
         try:
-            async with self.session.get(f'{address}/peer/info', timeout=5) as resp:
-                if resp.status == 200:
-                    peer_data = await resp.json()
-                    peer = PeerNode(
-                        id=peer_data['id'],
-                        address=address,
-                        last_seen=datetime.now(),
-                        consensus_version=peer_data.get('consensus_version', 'unknown')
-                    )
-                    self.known_peers[peer.id] = peer
-                    self.active_peers.add(peer.id)
-                    
-                    # Get peer's known nodes
-                    async with self.session.get(f'{address}/peer/known_nodes') as peers_resp:
-                        if peers_resp.status == 200:
-                            new_peers = await peers_resp.json()
-                            for new_peer in new_peers:
-                                if new_peer not in self.known_peers:
-                                    await self.validate_peer(new_peer)
-        except Exception as e:
-            print(f'Failed to validate peer {address}: {str(e)}')
-    
-    async def get_consensus_state(self) -> Dict:
-        """Gather consensus state from active peers"""
-        consensus_states = []
-        for peer_id in self.active_peers:
-            peer = self.known_peers[peer_id]
-            try:
-                async with self.session.get(f'{peer.address}/consensus/state') as resp:
-                    if resp.status == 200:
-                        state = await resp.json()
-                        consensus_states.append(state)
-            except Exception as e:
-                print(f'Failed to get consensus from {peer.address}: {str(e)}')
-                self.active_peers.remove(peer_id)
-        
-        return self._aggregate_consensus(consensus_states)
-    
-    def _aggregate_consensus(self, states: List[Dict]) -> Dict:
-        """Aggregate consensus states using configurable rules"""
-        if not states:
-            return {}
-            
-        # Simple majority rules aggregation
-        state_counts = {}
-        for state in states:
-            state_key = json.dumps(state, sort_keys=True)
-            state_counts[state_key] = state_counts.get(state_key, 0) + 1
-        
-        # Get most common state
-        majority_state = max(state_counts.items(), key=lambda x: x[1])[0]
-        return json.loads(majority_state)
+            # Fetch from Snapshot
+            snapshot_proposals = self._fetch_snapshot_proposals(chain_id)
+            proposals.extend(snapshot_proposals)
 
-# Example usage:
-# crawler = DistributedCrawler(['http://node1.example.com', 'http://node2.example.com'])
-# await crawler.start()
-# consensus = await crawler.get_consensus_state()
-# await crawler.stop()
+            # Fetch from Tally
+            tally_proposals = self._fetch_tally_proposals(chain_id) 
+            proposals.extend(tally_proposals)
+
+            # Fetch from on-chain governance
+            onchain_proposals = self._fetch_onchain_proposals(chain_id)
+            proposals.extend(onchain_proposals)
+
+        except Exception as e:
+            self.logger.error(f'Error fetching proposals: {str(e)}')
+
+        return self._deduplicate_proposals(proposals)
+
+    def _fetch_snapshot_proposals(self, chain_id: int) -> List[Dict]:
+        """Fetch proposals from Snapshot"""
+        snapshot_url = f'https://hub.snapshot.org/graphql'
+        query = """
+        query Proposals($chainId: Int) {
+            proposals(chainId: $chainId) {
+                id
+                title
+                body
+                start
+                end
+                state
+                choices
+                scores
+            }
+        }
+        """
+        try:
+            response = requests.post(
+                snapshot_url,
+                json={'query': query, 'variables': {'chainId': chain_id}}
+            )
+            return response.json().get('data', {}).get('proposals', [])
+        except:
+            self.logger.error('Failed to fetch Snapshot proposals')
+            return []
+
+    def _fetch_tally_proposals(self, chain_id: int) -> List[Dict]:
+        """Fetch proposals from Tally"""
+        tally_url = f'https://api.tally.xyz/query'
+        # Implementation specific to Tally API
+        return []
+
+    def _fetch_onchain_proposals(self, chain_id: int) -> List[Dict]:
+        """Fetch proposals directly from blockchain"""
+        proposals = []
+        for endpoint in self.rpc_endpoints:
+            try:
+                # Web3 implementation to fetch on-chain governance proposals
+                pass
+            except Exception as e:
+                self.logger.error(f'RPC endpoint {endpoint} failed: {str(e)}')
+                continue
+        return proposals
+
+    def _deduplicate_proposals(self, proposals: List[Dict]) -> List[Dict]:
+        """Remove duplicate proposals based on proposal ID"""
+        seen_ids = set()
+        unique_proposals = []
+
+        for prop in proposals:
+            if prop['id'] not in seen_ids:
+                seen_ids.add(prop['id'])
+                unique_proposals.append(prop)
+
+        return unique_proposals
+
+    def get_proposal_status(self, proposal_id: str) -> Optional[Dict]:
+        """Get current status of a specific proposal"""
+        try:
+            # Implementation to fetch specific proposal status
+            return {
+                'id': proposal_id,
+                'status': 'active',  # or 'passed', 'failed', 'pending'
+                'votes': {},
+                'updated_at': datetime.now().isoformat()
+            }
+        except Exception as e:
+            self.logger.error(f'Error fetching proposal {proposal_id}: {str(e)}')
+            return None
