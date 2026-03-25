@@ -1,98 +1,113 @@
-import pandas as pd
-from typing import Dict, List, Union
-from datetime import datetime
 import numpy as np
+from typing import Dict, List, Tuple
+from datetime import datetime
 
-class ConsensusAggregator:
+class DataAggregator:
     def __init__(self):
-        self.proposals = {}
-        self.votes = {}
-        self.participant_weights = {}
-    
-    def add_participant(self, participant_id: str, weight: float = 1.0):
-        """Add participant with optional reputation-based weight"""
-        self.participant_weights[participant_id] = weight
-    
-    def submit_proposal(self, proposal_id: str, proposal_data: Dict):
-        """Submit new governance proposal"""
-        self.proposals[proposal_id] = {
-            'data': proposal_data,
-            'timestamp': datetime.now(),
-            'status': 'active'
+        self.governance_data = {}
+        self.trust_scores = {}
+        self.anomaly_thresholds = {
+            'participation_rate': 0.2,
+            'consensus_deviation': 2.0
         }
-        self.votes[proposal_id] = {}
 
-    def cast_vote(self, proposal_id: str, participant_id: str, vote: bool):
-        """Cast weighted vote on proposal"""
-        if proposal_id not in self.proposals:
-            raise ValueError(f'Invalid proposal ID: {proposal_id}')
+    def add_governance_data(self, source: str, data: Dict, timestamp: datetime) -> None:
+        """Add new governance data from a source with timestamp"""
+        if source not in self.governance_data:
+            self.governance_data[source] = []
+        self.governance_data[source].append({
+            'data': data,
+            'timestamp': timestamp
+        })
+
+    def calculate_trust_score(self, source: str) -> float:
+        """Calculate trust score based on historical accuracy and consistency"""
+        if not self.governance_data.get(source):
+            return 0.0
+
+        data_points = self.governance_data[source]
+        consistency_score = self._evaluate_consistency(data_points)
+        timeliness_score = self._evaluate_timeliness(data_points)
         
-        if participant_id not in self.participant_weights:
-            raise ValueError(f'Unknown participant: {participant_id}')
+        trust_score = (consistency_score * 0.7) + (timeliness_score * 0.3)
+        self.trust_scores[source] = trust_score
+        return trust_score
+
+    def get_weighted_consensus(self) -> Dict:
+        """Calculate weighted consensus across all sources"""
+        if not self.governance_data:
+            return {}
+
+        weighted_data = {}
+        total_weight = 0
+
+        for source in self.governance_data:
+            trust_score = self.calculate_trust_score(source)
+            latest_data = self.governance_data[source][-1]['data']
             
-        self.votes[proposal_id][participant_id] = {
-            'vote': vote,
-            'weight': self.participant_weights[participant_id],
-            'timestamp': datetime.now()
-        }
+            for key, value in latest_data.items():
+                if key not in weighted_data:
+                    weighted_data[key] = 0
+                weighted_data[key] += value * trust_score
+            total_weight += trust_score
 
-    def get_consensus_state(self, proposal_id: str) -> Dict:
-        """Calculate current weighted consensus state"""
-        if proposal_id not in self.proposals:
-            raise ValueError(f'Invalid proposal ID: {proposal_id}')
+        if total_weight > 0:
+            return {k: v/total_weight for k, v in weighted_data.items()}
+        return weighted_data
+
+    def detect_anomalies(self) -> List[Dict]:
+        """Detect anomalies in governance data"""
+        anomalies = []
+        consensus = self.get_weighted_consensus()
+
+        for source in self.governance_data:
+            latest_data = self.governance_data[source][-1]['data']
             
-        votes = self.votes[proposal_id]
-        total_weight = sum(self.participant_weights.values())
-        approve_weight = sum(v['weight'] for v in votes.values() if v['vote'])
-        reject_weight = sum(v['weight'] for v in votes.values() if not v['vote'])
-        
-        consensus_ratio = approve_weight / total_weight if total_weight > 0 else 0
-        
-        return {
-            'proposal_id': proposal_id,
-            'total_votes': len(votes),
-            'approve_weight': approve_weight,
-            'reject_weight': reject_weight,
-            'consensus_ratio': consensus_ratio,
-            'quorum_reached': len(votes) >= len(self.participant_weights) * 0.5,
-            'timestamp': datetime.now()
-        }
+            for key, value in latest_data.items():
+                if key in consensus:
+                    deviation = abs(value - consensus[key])
+                    if deviation > self.anomaly_thresholds['consensus_deviation']:
+                        anomalies.append({
+                            'source': source,
+                            'metric': key,
+                            'value': value,
+                            'consensus': consensus[key],
+                            'deviation': deviation
+                        })
 
-    def get_all_active_proposals(self) -> List[Dict]:
-        """Get status of all active proposals"""
-        active_proposals = []
-        for pid, proposal in self.proposals.items():
-            if proposal['status'] == 'active':
-                consensus = self.get_consensus_state(pid)
-                active_proposals.append({
-                    **proposal,
-                    'consensus': consensus
-                })
-        return active_proposals
+        return anomalies
 
-    def export_results(self, filepath: str):
-        """Export voting results to CSV"""
-        results = []
-        for pid, proposal in self.proposals.items():
-            consensus = self.get_consensus_state(pid)
-            results.append({
-                'proposal_id': pid,
-                'status': proposal['status'],
-                'total_votes': consensus['total_votes'],
-                'consensus_ratio': consensus['consensus_ratio'],
-                'quorum_reached': consensus['quorum_reached']
-            })
-        
-        df = pd.DataFrame(results)
-        df.to_csv(filepath, index=False)
+    def _evaluate_consistency(self, data_points: List[Dict]) -> float:
+        """Evaluate data consistency for a source"""
+        if len(data_points) < 2:
+            return 0.5
 
-def calculate_participant_weight(history: List[Dict]) -> float:
-    """Calculate participant weight based on historical participation"""
-    if not history:
-        return 1.0
-    
-    participation_rate = len([h for h in history if h['participated']]) / len(history)
-    time_weights = np.exp(-np.arange(len(history)) * 0.1) # More recent actions weighted higher
-    weighted_score = np.mean(time_weights * participation_rate)
-    
-    return max(0.1, min(2.0, weighted_score)) # Bound weights between 0.1 and 2.0
+        variations = []
+        for i in range(1, len(data_points)):
+            prev = data_points[i-1]['data']
+            curr = data_points[i]['data']
+            
+            # Calculate average variation across all metrics
+            metric_variations = []
+            for key in curr:
+                if key in prev:
+                    variation = abs(curr[key] - prev[key]) / max(prev[key], 1)
+                    metric_variations.append(variation)
+            
+            if metric_variations:
+                variations.append(np.mean(metric_variations))
+
+        return 1.0 / (1.0 + np.mean(variations)) if variations else 0.5
+
+    def _evaluate_timeliness(self, data_points: List[Dict]) -> float:
+        """Evaluate timeliness of data updates"""
+        if len(data_points) < 2:
+            return 0.5
+
+        time_gaps = []
+        for i in range(1, len(data_points)):
+            gap = (data_points[i]['timestamp'] - data_points[i-1]['timestamp']).total_seconds()
+            time_gaps.append(gap)
+
+        avg_gap = np.mean(time_gaps)
+        return 1.0 / (1.0 + avg_gap/86400)  # Normalize by day
